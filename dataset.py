@@ -20,9 +20,19 @@ class MedMCQA_Datamodule(pl.LightningDataModule):
         if stage == 'fit' or stage == "validate" or stage is None:
             
             self.logger.info('Setting up train and val dataset')
-            self.train_dataset = torch.load(folder_path + "train_dataset.pt")
+            if self.parser_args["contrastive"] == False:
+                self.logger.info('Loading train dataset without explanations')
+                self.train_dataset = torch.load(folder_path + "train_dataset.pt")
+            else:
+                self.logger.info('Loading train dataset with explanations')
+                self.train_dataset = torch.load(folder_path + "train_dataset_with_explanations.pt")
 
-            self.val_dataset = torch.load(folder_path + "val_dataset.pt")
+            if self.parser_args['has_additional_prompt'] == False:
+                self.val_dataset = torch.load(folder_path + "val_dataset.pt")
+            else:
+                model_name = "general-bert" if self.parser_args['pretrained_model'] == "bert-base-uncased" else "pubmed-bert"
+                self.logger.info(f'Loading val dataset with hints added tokenized by {model_name}')
+                self.val_dataset = torch.load(f'/root/pubmedQA_291/dataset_pickles/medmcqa/hints-added-tokenized-by-{model_name}/classification_style/val.pt')
             
         if stage == "test"   : 
             self.logger.info('Setting up test dataset')

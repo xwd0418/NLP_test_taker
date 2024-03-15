@@ -13,6 +13,7 @@ class MedMCQAModel(LightningModule):
                             num_labels=num_labels,
                             attention_probs_dropout_prob=parser_args['attention_dropout'],
                             hidden_dropout_prob=parser_args['hidden_dropout'],
+                            output_attentions=False if parser_args.get('output_attentions') is None else parser_args['output_attentions'],
                             )
         
         self.learning_rate = parser_args["lr"]
@@ -23,16 +24,54 @@ class MedMCQAModel(LightningModule):
         self.logger_should_sync_dist = torch.cuda.device_count() > 1
         self.save_hyperparameters(*kwargs.keys())
         self.my_logger = logging.getLogger("lightning")
+        
+        if self.parser_args["contrastive"] == True:
+            self.exp_projection = torch.nn.Linear(768, 784)
+            self.mcq_projection = torch.nn.Linear(768, 784)
+            self.temp = torch.nn.Parameter(torch.tensor(1.0),requires_grad=True)
 
-    def forward(self, input_ids, attention_mask, labels=None):
-        output = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+    def forward(self, input_ids, attention_mask, labels=None, output_hidden_states=False):
+        output = self.model(input_ids, attention_mask=attention_mask, labels=labels, output_hidden_states=output_hidden_states)
         return output
 
     def training_step(self, batch, batch_idx):
-        input_ids, attention_mask, labels = batch
-        outputs = self(input_ids, attention_mask, labels=labels)
+        if self.parser_args["contrastive"] == False:
+            input_ids, attention_mask, labels = batch
+        else:
+            input_ids, attention_mask, exp_ids, exp_attention_mask, exp_exist, labels = batch
+        
+        # CE loss
+        outputs = self(input_ids, attention_mask, labels=labels, output_hidden_states=self.parser_args["contrastive"])
         loss = outputs.loss
         self.log("train/ce_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)  # Log training loss
+        
+        
+        # train accu
+        logits = outputs.logits
+        preds = torch.argmax(logits, dim=1)
+        acc = torch.tensor(torch.sum(preds == labels).item() / len(preds))
+        self.log("train_acc", acc.item(), on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        
+        # contrastive loss
+        if self.parser_args["contrastive"] == True:
+            mc_cls_embedding = outputs.hidden_states[-1][:,0,:].squeeze(1) # shape of batch*784
+        
+            exp_outputs = self(exp_ids, exp_attention_mask, output_hidden_states=True)
+            exp_cls_embedding = exp_outputs.hidden_states[-1][:,0,:].squeeze(1) # shape of batch*784
+            exp_cls_embedding = self.exp_projection(exp_cls_embedding)
+            exp_cls_embedding = torch.nn.functional.normalize(exp_cls_embedding, dim=-1)
+            mc_cls_embedding = self.mcq_projection(mc_cls_embedding)
+            mc_cls_embedding = torch.nn.functional.normalize(mc_cls_embedding, dim=-1)
+            contrastive_logits = exp_cls_embedding @ mc_cls_embedding.T
+            contrastive_logits = contrastive_logits * torch.exp(self.temp)
+        
+            contrastive_ground_truth = torch.diag(exp_exist).to(self.device)
+            contrastive_ground_truth = torch.where(exp_exist==0, torch.ones(len(exp_exist)).to(self.device)/len(exp_exist), contrastive_ground_truth).float()
+            contrastive_ground_truth = contrastive_ground_truth.T
+
+            contrastive_loss = torch.nn.functional.cross_entropy(contrastive_logits, contrastive_ground_truth)
+            self.log("train_contrastive_loss", contrastive_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+            loss += contrastive_loss * self.parser_args['contrastive_coeff']
         return loss
 
     def validation_step(self, batch, batch_idx):

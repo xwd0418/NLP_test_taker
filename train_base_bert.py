@@ -59,16 +59,22 @@ if __name__ == '__main__':
     parser.add_argument("--weight_decay", type=float, default=0.001)
     parser.add_argument("--hidden_dropout", type=float, default=0.5)
     parser.add_argument("--attention_dropout", type=float, default=0.5)
-    parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--patience", type=int, default=3)
     
     # parser.add_argument("--datasrc", type=str, default=f"/workspace/SMILES_dataset")
     parser.add_argument("--bs", type=int, default=32)
-    parser.add_argument("--num_workers", type=int, default=24)
+    parser.add_argument("--num_workers", type=int, default=16)
     
     # for early stopping/model saving
     parser.add_argument("--metric", type=str, default="val/mean_acc")
     parser.add_argument("--metricmode", type=str, default="max")
     parser.add_argument("--checkpoint_path", type=str, default=None, help="Path to the checkpoint file to resume training")
+    parser.add_argument("--saved_model_path", type=str, default=None, help="Path to the checkpoint file to resume training, not strict")
+    
+    # constrastive
+    parser.add_argument("--contrastive", action="store_true", help="Whether to use contrastive learning")
+    # contrastive_coeff defualt None
+    parser.add_argument("--contrastive_coeff", type=float, default=None, help="Contrastive loss coefficient")
     
     args = vars(parser.parse_known_args()[0])
     
@@ -78,13 +84,17 @@ if __name__ == '__main__':
     path2 = args['pretrained_model'] + "_"+ args['model_style']+"/" + args['expname']
     my_logger = init_logger(out_path, path1, path2)
     my_logger.info(f'[Main] Output Path: {out_path}/{path1}/{path2}')
+    my_logger.info(f'[Main] gpu: {torch.cuda.get_device_name()}')
     # my_logger.info(f'[Main] Hyperparameters: {hparam_string}')
     
     
     # Instantiate the model and datamodule
     data_module = MedMCQA_Datamodule(batch_size=args["bs"], parser_args=args)
-    model = MedMCQAModel(parser_args=args, **args)
-
+    if args['saved_model_path']:
+        model = MedMCQAModel.load_from_checkpoint(args['saved_model_path'],strict=False, parser_args=args)
+    else:
+        model = MedMCQAModel(parser_args=args, **args)
+        
     # Trainer, callbacks
     metric, metricmode, patience = args["metric"], args["metricmode"], args["patience"]
 
@@ -98,6 +108,7 @@ if __name__ == '__main__':
                          accelerator="gpu",
                          logger=tbl, 
                          callbacks=[checkpoint_callback, early_stopping, lr_monitor],
+                        #  limit_train_batches = 10
                         )
     
     
